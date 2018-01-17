@@ -29,6 +29,54 @@ static inline __attribute__((always_inline)) void writeCr0(uint64_t cr0)
   __asm__ volatile("movq %%cr0, %0" : : "r" (cr0) : "memory");
 }
 
+struct auditinfo_addr {
+    /*
+    4    ai_auid;
+    8    ai_mask;
+    24    ai_termid;
+    4    ai_asid;
+    8    ai_flags;r
+    */
+    char useless[184];
+};
+
+struct ucred {
+	uint32_t useless1;
+	uint32_t cr_uid;     // effective user id
+	uint32_t cr_ruid;    // real user id
+ 	uint32_t useless2;
+    	uint32_t useless3;
+    	uint32_t cr_rgid;    // real group id
+    	uint32_t useless4;
+    	void *useless5;
+    	void *useless6;
+    	void *cr_prison;     // jail(2)
+    	void *useless7;
+    	uint32_t useless8;
+    	void *useless9[2];
+    	void *useless10;
+    	struct auditinfo_addr useless11;
+    	uint32_t *cr_groups; // groups
+    	uint32_t useless12;
+};
+
+struct filedesc {
+	void *useless1[3];
+    	void *fd_rdir;
+    	void *fd_jdir;
+};
+
+struct proc {
+    	char useless[64];
+    	struct ucred *p_ucred;
+    	struct filedesc *p_fd;
+};
+
+struct thread {
+    	void *useless;
+    	struct proc *td_proc;
+};
+
 struct payload_info
 {
   uint8_t* buffer;
@@ -282,23 +330,67 @@ void do_patch()
   
 }
 
-int syscall_install_payload(void* td, struct syscall_install_payload_args* args)
+int syscall_install_payload(struct thread *td, struct syscall_install_payload_args* args)
 {
   uint64_t cr0;
   typedef uint64_t vm_offset_t;
   typedef uint64_t vm_size_t;
   typedef void* vm_map_t;
+  
+  struct ucred* cred;
+  struct filedesc* fd;
+
+  fd = td->td_proc->p_fd;
+  cred = td->td_proc->p_ucred;
 
   void* (*kernel_memcpy)(void* dst, const void* src, size_t len);
   void (*kernel_printf)(const char* fmt, ...);
   vm_offset_t (*kmem_alloc)(vm_map_t map, vm_size_t size);
 
   uint8_t* kernel_base = (uint8_t*)(__readmsr(0xC0000082) - 0x30EB30);
+  uint8_t* kernel_ptr = (uint8_t*)kernel_base;
+  void** got_prison0 =   (void**)&kernel_ptr[0xF26010];
+  void** got_rootvnode = (void**)&kernel_ptr[0x206D250];
 
   *(void**)(&kernel_printf) = &kernel_base[0x347580];
   *(void**)(&kernel_memcpy) = &kernel_base[0x286CF0];
   *(void**)(&kmem_alloc) = &kernel_base[0x369500];
   vm_map_t kernel_map = *(void**)&kernel_base[0x1FE71B8];
+  
+	cred->cr_uid = 0;
+	cred->cr_ruid = 0;
+	cred->cr_rgid = 0;
+	cred->cr_groups[0] = 0;
+
+	cred->cr_prison = *got_prison0;
+	fd->fd_rdir = fd->fd_jdir = *got_rootvnode;
+  
+	// uart enabler
+	*(char *)(kernel_base + 0x186b0a0) = 0; // set the console disable console output bool
+
+	// specters debug settings patchs
+
+	*(char *)(kernel_base + 0x2001516) |= 0x14;
+	*(char *)(kernel_base + 0x2001539) |= 1;
+	*(char *)(kernel_base + 0x2001539) |= 2;
+	*(char *)(kernel_base + 0x200153A) |= 1;
+	*(char *)(kernel_base + 0x2001558) |= 1;	
+
+	// Disable write protection
+
+	cr0 = readCr0();
+	writeCr0(cr0 & ~X86_CR0_WP);
+
+	// debug menu full patches thanks to sealab
+
+	*(uint32_t *)(kernel_base + 0x4CECB7) = 0;
+	*(uint32_t *)(kernel_base + 0x4CFB9B) = 0;
+
+	// Target ID Patches :)
+
+	*(uint16_t *)(kernel_base + 0x1FE59E4) = 0x8101;
+	*(uint16_t *)(kernel_base + 0X1FE5A2C) = 0x8101;
+	*(uint16_t *)(kernel_base + 0x200151C) = 0x8101;
 
 
   if (!args->payload_info)
@@ -469,11 +561,12 @@ int _main(void)
 
   initKernel();
   
-  do_patch();
+  
   struct payload_info payload_info;
   payload_info.buffer = payload_data;
   payload_info.size = payload_size;
   errno = 0;
   int result = kexec(&syscall_install_payload, &payload_info);
+  do_patch();
   return !result ? 0 : errno;
 }
