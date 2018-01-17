@@ -815,7 +815,7 @@ PAYLOAD_CODE static struct fake_key_desc* get_free_fake_key_slot(void) {
 }
 
 PAYLOAD_CODE static inline struct sbl_key_rbtree_entry* sceSblKeymgrGetKey(unsigned int handle) {
-	struct sbl_key_rbtree_entry* entry;
+	struct sbl_key_rbtree_entry* entry = *sbl_keymgr_key_rbtree;
 
 	while (entry) {
 		if (entry->handle < handle)
