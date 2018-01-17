@@ -69,6 +69,219 @@ struct payload_header
   size_t entrypoint_offset;
 };
 
+int find_process(const char* target)
+{
+  int pid;
+  int mib[3] = {1, 14, 0};
+  size_t size, count;
+  char* data;
+  char* proc;
+
+  if (sysctl(mib, 3, NULL, &size, NULL, 0) < 0)
+  {
+	  
+    return -1;
+  }
+
+  if (size == 0)
+  {
+    return -2;
+  }
+
+  data = (char*)malloc(size);
+  if (data == NULL)
+  {
+    return -3;
+  }
+
+  if (sysctl(mib, 3, data, &size, NULL, 0) < 0)
+  {
+    free(data);
+    return -4;
+  }
+
+  count = size / 0x448;
+  proc = data;
+  pid = -1;
+  while (count != 0)
+  {
+    char* name = &proc[0x1BF];
+	
+    if (strncmp(name, target, strlen(target)) == 0)
+    {
+      pid = *(int*)(&proc[0x48]);
+      break;
+    }
+    proc += 0x448;
+    count--;
+  }
+
+  free(data);
+  return pid;
+}
+
+int get_code_info(int pid, uint64_t* paddress, uint64_t* psize, uint64_t known_size)
+{
+  int mib[4] = {1, 14, 32, pid};
+  size_t size, count;
+  char* data;
+  char* entry;
+
+  if (sysctl(mib, 4, NULL, &size, NULL, 0) < 0)
+  {
+	  
+    return -1;
+  }
+
+  if (size == 0)
+  {
+    return -2;
+  }
+
+  data = (char*)malloc(size);
+  if (data == NULL)
+  {
+    return -3;
+  }
+
+  if (sysctl(mib, 4, data, &size, NULL, 0) < 0)
+  {
+    free(data);
+    return -4;
+  }
+
+  int struct_size = *(int*)data;
+  count = size / struct_size;
+  entry = data;
+
+  int found = 0;
+  while (count != 0)
+  {
+    int type = *(int*)(&entry[0x4]);
+    uint64_t start_addr = *(uint64_t*)(&entry[0x8]);
+    uint64_t end_addr = *(uint64_t*)(&entry[0x10]);
+    uint64_t code_size = end_addr - start_addr;
+    uint32_t prot = *(uint32_t*)(&entry[0x38]);
+
+
+    if (type == 255 && prot == 5 && code_size == known_size)
+    {
+      *paddress = start_addr;
+      *psize = (end_addr - start_addr);
+      found = 1;
+      break;
+    }
+
+    entry += struct_size;
+    count--;
+  }
+
+  free(data);
+  return !found ? -5 : 0;
+}
+
+typedef struct _patch_info
+{
+  const char* name;
+  uint32_t address;
+  const char* data;
+  uint32_t size;
+}
+patch_info;
+
+int apply_patches(int pid, uint64_t known_size, patch_info* patches)
+{
+  uint64_t code_address, code_size;
+  int result = get_code_info(pid, &code_address, &code_size, known_size);
+  if (result < 0)
+  {
+
+    return -1;
+  }
+
+  char proc_path[64];
+  sprintf(proc_path, "/mnt/proc/%d/mem", pid);
+
+  int fd = open(proc_path, O_RDWR, 0);
+  if (fd < 0)
+  {
+
+    return -2;
+  }
+
+  for (int i = 0; patches[i].name != NULL; i++)
+  {
+    lseek(fd, code_address + patches[i].address, SEEK_SET);
+    result = write(fd, patches[i].data, patches[i].size);
+
+  }
+
+  close(fd);
+  return 0;
+}
+
+patch_info shellcore_patches[32] =
+{
+  //{ "Enable Logging",                               0xF9664E, "\x00", 1 },
+  //{ "Enable Logging",                               0xF9664E, "\x01", 1 },
+/*
+  { "Allow WebProcess LaunchApp #1",                0x28CE09, "\x90\xE9", 2 },
+  { "Allow WebProcess LaunchApp #2",                0x28D02A, "\x90\xE9", 2 },
+  { "Allow WebProcess LaunchApp #3",                0x28D0E0, "\xEB", 1 },
+
+  { "Enable Development Mounts",                    0x276A83, "\xEB", 1 },
+*/  
+  { "debug pkg patch",                    0x11a0db, "\x31\xC0\x90\x90\x90", 5 },
+  { "debug pkg patch",                    0x66ea3b, "\x31\xC0\x90\x90\x90", 5 },
+  { "debug pkg patch",                    0x7f554b, "\x31\xC0\x90\x90\x90", 5 },
+  { "debug pkg patch",                    0x11a107, "\x31\xC0\x90\x90\x90", 5 },
+  { "debug pkg patch",                    0x66ea67, "\x31\xC0\x90\x90\x90", 5 },
+  { "debug pkg patch",                    0x7f5577, "\x31\xC0\x90\x90\x90", 5 },
+  { "debug pkg free string patch",        0xc980ee, "free\x00", 5 },
+
+  { NULL, 0, NULL, 0 },
+};
+
+int mount_procfs()
+{
+  int result = mkdir("/mnt/proc", 0777);
+  if (result < 0 && (*__error()) != 17)
+  {
+
+    return -1;
+  }
+
+  result = mount("procfs", "/mnt/proc", 0, NULL);
+  if (result < 0)
+  {
+
+    return -2;
+  }
+
+  return 0;
+}
+
+void do_patch()
+{
+  int result;
+
+  int shell_pid = find_process("SceShellCore");
+  if (shell_pid < 0)
+  {
+    return;
+  }
+  
+
+  result = mount_procfs();
+  if (result)
+  {
+    return;
+  }
+
+  apply_patches(shell_pid, 0xF18000, shellcore_patches);
+  
+}
+
 int syscall_install_payload(void* td, struct syscall_install_payload_args* args)
 {
   uint64_t cr0;
@@ -87,12 +300,10 @@ int syscall_install_payload(void* td, struct syscall_install_payload_args* args)
   *(void**)(&kmem_alloc) = &kernel_base[0x369500];
   vm_map_t kernel_map = *(void**)&kernel_base[0x1FE71B8];
 
-  kernel_printf("\n\n\n\npayload_installer: starting\n");
-  kernel_printf("payload_installer: kernel base=%lx\n", kernel_base);
 
   if (!args->payload_info)
   {
-    kernel_printf("payload_installer: bad payload info\n");
+
     return -1;
   }
 
@@ -104,7 +315,7 @@ int syscall_install_payload(void* td, struct syscall_install_payload_args* args)
       payload_size < sizeof(payload_header) ||
       payload_header->signature != 0x5041594C4F414433ull)
   {
-    kernel_printf("payload_installer: bad payload data\n");
+
     return -2;
   }
 
@@ -117,11 +328,10 @@ int syscall_install_payload(void* td, struct syscall_install_payload_args* args)
   kernel_base[0x3695A5] = 7;
   writeCr0(cr0);
 
-  kernel_printf("payload_installer: kmem_alloc\n");
   uint8_t* payload_buffer = (uint8_t*)kmem_alloc(kernel_map, desired_size);
   if (!payload_buffer)
   {
-    kernel_printf("payload_installer: kmem_alloc failed\n");
+
     return -3;
   }
 
@@ -132,15 +342,10 @@ int syscall_install_payload(void* td, struct syscall_install_payload_args* args)
   kernel_base[0x3695A5] = 3;
   writeCr0(cr0);
 
-  kernel_printf("payload_installer: installing...\n");
-  kernel_printf("payload_installer: target=%lx\n", payload_buffer);
-  kernel_printf("payload_installer: payload=%lx,%lu\n",
-    payload_data, payload_size);
+  
 
-  kernel_printf("payload_installer: memcpy\n");
   kernel_memcpy((void*)payload_buffer, payload_data, payload_size);
 
-  kernel_printf("payload_installer: patching payload pointers\n");
   if (payload_header->real_info_offset != 0 &&
     payload_header->real_info_offset + sizeof(struct real_info) <= payload_size)
   {
@@ -154,13 +359,11 @@ int syscall_install_payload(void* td, struct syscall_install_payload_args* args)
         (uint64_t*)(&payload_buffer[real_info->payload_offset]);
       void* kernel_target = &kernel_base[real_info->kernel_offset];
       *payload_target = (uint64_t)kernel_target;
-      kernel_printf("  %x(%lx) = %x(%lx)\n",
-        real_info->payload_offset, payload_target,
-        real_info->kernel_offset, kernel_target);
+
+       
     }
   }
 
-  kernel_printf("payload_installer: patching caves\n");
   if (payload_header->cave_info_offset != 0 &&
     payload_header->cave_info_offset + sizeof(struct cave_info) <= payload_size)
   {
@@ -179,29 +382,26 @@ int syscall_install_payload(void* td, struct syscall_install_payload_args* args)
 
       if (&kernel_call_target[6] == kernel_ptr_target)
       {
-        kernel_printf("  %lx(%lx) = %d\n",
-          cave_info->kernel_call_offset, kernel_call_target,
-          new_disp);
+
+          
 
         if ((uint64_t)(kernel_ptr_target - &kernel_call_target[6]) != 0)
         {
-          kernel_printf("  error: new_disp != 0!\n");
+
         }
       }
       else
       {
-        kernel_printf("  %lx(%lx) -> %lx(%lx) = %d\n",
-          cave_info->kernel_call_offset, kernel_call_target,
-          cave_info->kernel_ptr_offset, kernel_ptr_target,
-          new_disp);
+
+       
 
         if ((uint64_t)(kernel_ptr_target - &kernel_call_target[6]) > UINT32_MAX)
         {
-          kernel_printf("  error: new_disp > UINT32_MAX!\n");
+
         }
       }
-      kernel_printf("    %lx(%lx)\n",
-        cave_info->payload_offset, payload_target);
+
+        
 
 #pragma pack(push,1)
       struct
@@ -222,7 +422,6 @@ int syscall_install_payload(void* td, struct syscall_install_payload_args* args)
     }
   }
 
-  kernel_printf("payload_installer: patching calls\n");
   if (payload_header->disp_info_offset != 0 &&
     payload_header->disp_info_offset + sizeof(struct disp_info) <= payload_size)
   {
@@ -237,12 +436,7 @@ int syscall_install_payload(void* td, struct syscall_install_payload_args* args)
 
       int32_t new_disp = (int32_t)(cave_target - &call_target[5]);
 
-      kernel_printf("  %lx(%lx)\n",
-        disp_info->call_offset + 1, &call_target[1]);
-      kernel_printf("    %lx(%lx) -> %lx(%lx) = %d\n",
-        disp_info->call_offset + 5, &call_target[5],
-        disp_info->cave_offset, cave_target,
-        new_disp);
+        
 
       cr0 = readCr0();
       writeCr0(cr0 & ~X86_CR0_WP);
@@ -254,23 +448,28 @@ int syscall_install_payload(void* td, struct syscall_install_payload_args* args)
   if (payload_header->entrypoint_offset != 0 &&
     payload_header->entrypoint_offset < payload_size)
   {
-    kernel_printf("payload_installer: entrypoint\n");
+
     void (*payload_entrypoint)();
     *((void**)&payload_entrypoint) =
       (void*)(&payload_buffer[payload_header->entrypoint_offset]);
     payload_entrypoint();
   }
 
-  kernel_printf("payload_installer: done\n");
   return 0;
 }
+
+void do_patch();
 
 int _main(void)
 {
   uint8_t* payload_data = (uint8_t*)(&payload_data_const[0]);
   size_t payload_size = sizeof(payload_data_const);
+  
+  
 
   initKernel();
+  
+  do_patch();
   struct payload_info payload_info;
   payload_info.buffer = payload_data;
   payload_info.size = payload_size;
